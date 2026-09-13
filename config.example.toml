@@ -1,0 +1,45 @@
+# Copy to config.toml. Nothing here is secret; secrets (OAuth client, token, vault key)
+# live only in the macOS Keychain.
+
+[source]
+# Full URL as copied from the browser, or the bare spreadsheet id.
+spreadsheet = "https://docs.google.com/spreadsheets/d/PUT-YOUR-SPREADSHEET-ID-HERE/edit"
+ledger_tab = "All-Data"
+reference_tab = "Reference"
+trades_tab = "Trades"          # optional; ignored when the tab does not exist
+# When set, sync reads this file instead of Drive (offline development, synthetic data).
+local_file = ""
+
+[storage]
+vault = "data/kalecki.vault"
+keyring_service = "kaleckiPNL"
+
+[network]
+offline = false                # true: never call NBP or Yahoo; use the sheet's own FX rate
+
+[tax]
+threshold_pln = 100000         # ryczałt band switch; 200000 for spouses taxed jointly
+rate_low = 0.085
+rate_high = 0.125
+advance_due_day = 20           # advance for month M is due on this day of month M+1
+
+[analysis]
+arrears_threshold = 500        # PLN of cumulative shortfall before a unit is flagged
+arrears_months = 2             # consecutive months of shortfall before a unit is flagged
+rent_unchanged_months = 12     # indexation reminder
+owner_pays_hoa = true          # HOA fee reduces net income (false: passed to the tenant)
+owner_pays_electricity = true
+muted = []                     # problem kinds to hide, e.g. ["vacancy", "rent_unchanged"]
+
+[fx]
+base_currency = "PLN"
+# Units billed in a foreign currency; the sheet's kurs NBP column also implies GBP.
+# foreign_units = { "City, Street 1/ 2" = "GBP" }
+
+[valuations]
+# Paste cells from a sheet: "year price_per_m2", or "year city1 city2 ..." with a header row.
+table = """
+2024	12000
+2025	13000
+"""
+garage_value_index = true      # scale garage T0 value by the city's price index

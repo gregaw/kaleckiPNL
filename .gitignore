@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+/data/
+*.vault
+*.xlsx
+!tests/data/sample.xlsx
+client_secret*.json
+token*.json
+.env
+/config.toml
+.DS_Store

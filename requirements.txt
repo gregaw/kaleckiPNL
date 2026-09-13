@@ -1,0 +1,12 @@
+streamlit>=1.40
+polars>=1.20
+duckdb>=1.2
+cryptography>=43
+keyring>=25
+openpyxl>=3.1
+google-api-python-client>=2.150
+google-auth-oauthlib>=1.2
+google-auth-httplib2>=0.2
+requests>=2.32
+yfinance>=0.2.50
+altair>=5
