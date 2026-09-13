@@ -9,5 +9,5 @@ __pycache__/
 client_secret*.json
 token*.json
 .env
-config.toml
+/config.toml
 .DS_Store
