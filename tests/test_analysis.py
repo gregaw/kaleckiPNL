@@ -1,3 +1,4 @@
+import datetime as dt
 import polars as pl
 import pytest
 
@@ -96,3 +97,56 @@ def test_duplicate_and_gap_detection():
     pr = an.problems(p, units, e.arrears(p), e.discrepancies(p))
     kinds = dict(pr.group_by("kind").len().iter_rows())
     assert kinds["duplicate_row"] == 1 and kinds["missing_month"] == 2
+
+
+def test_growth_values_compounds_from_t0_year():
+    units = pl.DataFrame({"unit_key": ["F", "G", "H"], "kind": ["mieszkanie", "garaz", "mieszkanie"], "city": ["Krakow", "Krakow", None],
+                          "value_t0": [100_000.0, 10_000.0, 50_000.0],
+                          "acquired_on": [dt.date(2023, 5, 1), dt.date(2024, 1, 1), None]})
+    v = an.growth_values(units, {"krakow": 0.10}, [2023, 2024, 2025], default_growth=0.0)
+    f = v.filter(pl.col("unit_key") == "F")
+    assert f["year"].to_list() == [2023, 2024, 2025]
+    assert f["value_pln"].to_list() == [100_000.0, 110_000.0, 121_000.0]
+    g = v.filter(pl.col("unit_key") == "G")
+    assert g["year"].to_list() == [2024, 2025] and g["value_pln"].to_list() == [10_000.0, 11_000.0]  # nothing before T0
+    h = v.filter(pl.col("unit_key") == "H")
+    assert h["value_pln"].to_list() == [50_000.0] * 3  # unknown city, default 0 %, valued from the first year asked
+    assert "10.0 %" in f["value_source"][0]
+    m = an.values_matrix(v, units)
+    assert m.columns == ["unit_key", "city", "kind", "value_t0", "2023", "2024", "2025"]
+    assert m.filter(pl.col("unit_key") == "TOTAL")["2025"][0] == 121_000 + 11_000 + 50_000
+    assert an.growth_values(units, {}, []).height == 0
+
+
+def test_growth_values_feed_returns(parsed):
+    p = e.monthly_pnl(parsed.ledger, parsed.units)
+    s = e.unit_year_summary(p, parsed.units)
+    years = sorted(s["year"].unique().to_list())
+    v = an.growth_values(parsed.units, {"Krakow": 0.05}, years, 0.02)
+    r = an.returns(s, parsed.units, v, e.tax_estimate(p, Config().tax), Config())
+    later = r.filter(pl.col("year") == years[-1]).filter(pl.col("capital_return").is_not_null())
+    assert later.height > 0
+    for x in later["capital_return"].to_list():  # values are rounded to whole PLN
+        assert min(abs(x - 0.05), abs(x - 0.02)) < 1e-4
+
+
+def test_pivot_and_drill(parsed):
+    p = e.monthly_pnl(parsed.ledger, parsed.units)
+    wide = an.pivot(p, ["city"], "net_income_pln", "sum", "year")
+    years = sorted(str(y) for y in p["year"].unique().to_list())
+    assert wide.columns == ["city"] + years + ["TOTAL"]
+    assert wide["TOTAL"].sum() == pytest.approx(p["net_income_pln"].sum(), abs=0.05)
+    long = an.pivot(p, ["city", "year"], "net_income_pln", "sum")
+    assert long.columns == ["city", "year", "net_income_pln"] and long.height == wide.height * len(years)
+    cnt = an.pivot(p, ["unit_key"], "net_income_pln", "count", filters={"year": [p["year"].min()]})
+    assert cnt["net_income_pln"].max() <= 12
+    y = an.pivot(p, ["unit_key"], "yield_on_t0", "sum", "year")
+    u = parsed.units.filter(pl.col("value_t0") > 0).row(0, named=True)["unit_key"]
+    s = e.unit_year_summary(p, parsed.units).filter((pl.col("unit_key") == u) & (pl.col("year") == int(years[0])))
+    assert y.filter(pl.col("unit_key") == u)[years[0]][0] == pytest.approx(s["yield_on_t0"][0])
+    no_rows = an.pivot(p, [], "net_income_pln", "sum", "year")
+    assert no_rows.height == 1 and "TOTAL" in no_rows.columns
+    with pytest.raises(ValueError):
+        an.pivot(p, [], "net_income_pln", "sum")
+    d = an.drill(p, {"unit_key": u, "year": years[0], "TOTAL": 1.0, "not_a_column": "x"})
+    assert d.height == s["months"][0] and set(d["unit_key"].to_list()) == {u}

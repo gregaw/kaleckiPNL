@@ -23,11 +23,11 @@ model. This file is what a change must respect.
 
 | Path | What |
 |---|---|
-| `app.py` | Streamlit dashboard: loopback guard, sidebar (sync, upload, sign-in, market data, shutdown), seven tabs. |
+| `app.py` | Streamlit dashboard: loopback guard, sidebar (sync, upload, sign-in, market data, shutdown), eight tabs. `table(..., drill=pnl)` gives any aggregate table a click-a-cell drill-down. |
 | `sync.py` | Drive OAuth + export, local-file ingest, sync log; CLI. |
 | `engine.py` | DuckDB schema; rental engine (sheet formulas, FX, arrears, yearly summary, ryczałt, schedule); FIFO/LIFO/average trades. Pure, tested. |
 | `kalecki/parse.py` | xlsx → frames; header found by content, columns by normalized prefix. Pure, tested. |
-| `kalecki/analysis.py` | Pasted valuations, unit values, returns, portfolio returns, problems report. Pure, tested. |
+| `kalecki/analysis.py` | Valuations (per-city growth model, pasted price table), returns, portfolio returns, pivot/drill helpers, problems report. Pure, tested. |
 | `kalecki/store.py` | Vault + KeyStore. Tested with `MemoryKeyStore`. |
 | `kalecki/market.py` | NBP and Yahoo adapters, allowlist, offline mode. NBP walk-back tested with a fake session. |
 | `kalecki/config.py` | `config.toml` → `Config`. Nothing secret. |

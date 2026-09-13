@@ -253,3 +253,113 @@ def problems(pnl: pl.DataFrame, units: pl.DataFrame, arrears_df: pl.DataFrame, d
         df = df.filter(~pl.col("kind").is_in(a.muted))
     order = {"high": 0, "medium": 1, "low": 2}
     return df.with_columns(pl.col("severity").replace_strict(order, return_dtype=pl.Int32).alias("_o")).sort(["_o", "unit_key", "year", "month"]).drop("_o")
+
+
+# ----------------------------------------------------------------------------- growth-model valuations
+
+VALUE_SCHEMA = {"unit_key": pl.Utf8, "year": pl.Int32, "value_pln": pl.Float64, "value_source": pl.Utf8}
+
+
+def growth_values(units: pl.DataFrame, growth: dict[str, float], years: list[int], default_growth: float = 0.0) -> pl.DataFrame:
+    """Simplified valuation: each unit's T0 value compounded at its city's annual % change.
+        value(year) = value_t0 × (1 + g_city) ** (year − T0 year)
+    T0 year is the unit's `acquired_on` year; a unit without one is valued from the first year
+    asked for. `growth` maps city → annual rate (0.05 = +5 %); cities not listed use
+    `default_growth`. Years before T0 are not valued. Same shape as `unit_values`."""
+    if units.height == 0 or not years:
+        return pl.DataFrame(schema=VALUE_SCHEMA)
+    yrs = pl.DataFrame({"year": sorted(set(int(y) for y in years))}, schema={"year": pl.Int32})
+    cols = ["unit_key", pl.col("city").cast(pl.Utf8), pl.col("value_t0").cast(pl.Float64)]
+    if "acquired_on" in units.columns:
+        cols.append(pl.col("acquired_on").dt.year().cast(pl.Int32).alias("t0_year"))
+    else:
+        cols.append(pl.lit(None, dtype=pl.Int32).alias("t0_year"))
+    g = units.select(cols).with_columns(pl.col("t0_year").fill_null(yrs["year"].min()))
+    rates = {k.strip().lower(): float(v) for k, v in growth.items()}
+    g = g.with_columns(pl.col("city").fill_null("").str.to_lowercase().str.strip_chars()
+                       .replace_strict(rates, default=float(default_growth), return_dtype=pl.Float64).alias("rate"))
+    grid = g.join(yrs, how="cross").filter(pl.col("year") >= pl.col("t0_year"))
+    grid = grid.with_columns([
+        (pl.col("value_t0") * (1.0 + pl.col("rate")).pow((pl.col("year") - pl.col("t0_year")).cast(pl.Float64))).round(0).alias("value_pln"),
+        pl.concat_str([pl.lit("T0 × (1 "), pl.when(pl.col("rate") >= 0).then(pl.lit("+ ")).otherwise(pl.lit("− ")),
+                       (pl.col("rate").abs() * 100).round(2).cast(pl.Utf8), pl.lit(" %)^n")]).alias("value_source"),
+    ])
+    return grid.select(list(VALUE_SCHEMA)).sort(["unit_key", "year"])
+
+
+def values_matrix(values: pl.DataFrame, units: pl.DataFrame) -> pl.DataFrame:
+    """unit × year wide table of values with city and T0, plus a TOTAL row; what the owner
+    eyeballs while typing a growth rate."""
+    if values.height == 0:
+        return pl.DataFrame()
+    wide = values.pivot(on="year", index="unit_key", values="value_pln")
+    years = sorted(int(c) for c in wide.columns if c != "unit_key")
+    wide = wide.select(["unit_key"] + [str(y) for y in years])
+    wide = units.select(["unit_key", "city", "kind", pl.col("value_t0").cast(pl.Float64)]).join(wide, on="unit_key", how="inner").sort(["city", "unit_key"])
+    tot = wide.select([pl.lit("TOTAL").alias("unit_key"), pl.lit(None, dtype=pl.Utf8).alias("city"), pl.lit(None, dtype=pl.Utf8).alias("kind"),
+                       pl.col("value_t0").sum()] + [pl.col(str(y)).sum() for y in years])
+    return pl.concat([wide, tot.cast(wide.schema)])
+
+
+# ----------------------------------------------------------------------------- pivot
+
+PIVOT_DIMS = ["unit_key", "year", "month", "city", "manager", "kind", "currency", "owner"]
+PIVOT_MEASURES = ["net_income_pln", "taxable_profit_pln", "contract_rent_pln", "transfer_pln", "expected_transfer_pln", "balance_pln",
+                  "repairs_pln", "mgmt_invoice_pln", "non_tax_costs_pln", "media_result", "hoa_fee", "electricity", "media_advance", "value_t0"]
+PIVOT_AGGS = {"sum": pl.Expr.sum, "mean": pl.Expr.mean, "min": pl.Expr.min, "max": pl.Expr.max, "count": pl.Expr.count}
+
+
+def pivot(pnl: pl.DataFrame, rows: list[str], value: str, agg: str = "sum", cols: str | None = None,
+          filters: dict[str, list] | None = None) -> pl.DataFrame:
+    """Slice the monthly PnL: group by `rows` (and spread `cols` across the columns), aggregate
+    `value` with `agg`. `filters` maps a dimension to the allowed values. Returns a long frame
+    (rows…, [cols], value) when `cols` is None, else a wide one with a `TOTAL` column.
+    `yield_on_t0` is a derived measure: sum(net_income_pln) / T0 value of the units in the group."""
+    if agg not in PIVOT_AGGS:
+        raise ValueError(f"agg must be one of {list(PIVOT_AGGS)}")
+    df = pnl
+    for k, allowed in (filters or {}).items():
+        if allowed:
+            df = df.filter(pl.col(k).is_in(allowed))
+    keys = list(dict.fromkeys(rows + ([cols] if cols else [])))
+    if not keys:
+        raise ValueError("pick at least one row or column dimension")
+    if value == "yield_on_t0":
+        per_unit = df.group_by(list(dict.fromkeys(keys + ["unit_key"]))).agg([pl.col("net_income_pln").sum().alias("_ni"), pl.col("value_t0").first().alias("_t0")])
+        out = per_unit.group_by(keys).agg([pl.col("_ni").sum().alias("_ni"), pl.col("_t0").sum().alias("_t0")])
+        out = out.with_columns(pl.when(pl.col("_t0") > 0).then(pl.col("_ni") / pl.col("_t0")).alias(value)).drop(["_ni", "_t0"])
+    else:
+        out = df.group_by(keys).agg(PIVOT_AGGS[agg](pl.col(value)).alias(value))
+        if agg != "count":
+            out = out.with_columns(pl.col(value).round(2))
+    out = out.sort(keys)
+    if not cols:
+        return out
+    wide = out.pivot(on=cols, index=rows, values=value) if rows else out.pivot(on=cols, index=None, values=value)
+    vcols = [c for c in wide.columns if c not in rows]
+    wide = wide.select(rows + sorted(vcols, key=lambda c: (len(c), c)))
+    if value != "yield_on_t0" and agg in ("sum", "count"):
+        wide = wide.with_columns(pl.sum_horizontal([pl.col(c) for c in vcols]).round(2).alias("TOTAL"))
+    return wide
+
+
+def drill(pnl: pl.DataFrame, selected: dict) -> pl.DataFrame:
+    """The monthly rows behind an aggregate cell: filter `pnl` on every key in `selected` that is
+    dimension of it (unit_key, year, month, city, manager …); measures and other keys are
+    ignored, and so is the TOTAL row/column."""
+    df = pnl
+    for k, v in selected.items():
+        if k not in PIVOT_DIMS or k not in df.columns or v is None or v == "TOTAL":
+            continue
+        if df.schema[k] in (pl.Int32, pl.Int64):
+            if isinstance(v, str):
+                if not v.lstrip("-").isdigit():
+                    continue
+                v = int(v)
+            elif isinstance(v, float):
+                v = int(v)
+        df = df.filter(pl.col(k) == v)
+    keep = [c for c in ["unit_key", "year", "month", "city", "manager", "currency", "contract_rent", "media_advance", "tenant_payment", "mgmt_invoice",
+                        "hoa_fee", "electricity", "repairs", "non_tax_costs", "transfer", "expected_transfer", "balance", "taxable_profit",
+                        "media_result", "net_income", "fx", "net_income_pln", "row_no"] if c in df.columns]
+    return df.select(keep).sort(["unit_key", "year", "month"])
