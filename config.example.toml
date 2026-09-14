@@ -37,9 +37,17 @@ base_currency = "PLN"
 # foreign_units = { "City, Street 1/ 2" = "GBP" }
 
 [valuations]
-# Paste cells from a sheet: "year price_per_m2", or "year city1 city2 ..." with a header row.
-table = """
-2024	12000
-2025	13000
-"""
-garage_value_index = true      # scale garage T0 value by the city's price index
+# Simplified model: each unit's T0 value compounds at its city's annual % change from the T0 year.
+# 0.05 = +5 % per year. Cities not listed use default_growth. Editable live on the Returns tab.
+default_growth = 0.03
+[valuations.growth]
+# Krakow = 0.06
+# Warszawa = 0.05
+
+# Alternative (Returns tab → "paste a price/m² table"): "year price_per_m2", or
+# "year city1 city2 ..." with a header row. Flat = price/m² × area.
+# table = """
+# 2024	12000
+# 2025	13000
+# """
+# garage_value_index = true      # scale garage T0 value by the city's price index

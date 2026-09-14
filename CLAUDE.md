@@ -23,11 +23,11 @@ model. This file is what a change must respect.
 
 | Path | What |
 |---|---|
-| `app.py` | Streamlit dashboard: loopback guard, sidebar (sync, upload, sign-in, market data, shutdown), seven tabs. |
+| `app.py` | Streamlit dashboard: loopback guard, sidebar (sync, upload, sign-in, market data, shutdown), eight tabs. `table(..., drill=pnl)` gives any aggregate table a click-a-cell drill-down. |
 | `sync.py` | Drive OAuth + export, local-file ingest, sync log; CLI. |
 | `engine.py` | DuckDB schema; rental engine (sheet formulas, FX, arrears, yearly summary, ryczałt, schedule); FIFO/LIFO/average trades. Pure, tested. |
 | `kalecki/parse.py` | xlsx → frames; header found by content, columns by normalized prefix. Pure, tested. |
-| `kalecki/analysis.py` | Pasted valuations, unit values, returns, portfolio returns, problems report. Pure, tested. |
+| `kalecki/analysis.py` | Valuations (per-city growth model, pasted price table), returns, portfolio returns, pivot/drill helpers, problems report. Pure, tested. |
 | `kalecki/store.py` | Vault + KeyStore. Tested with `MemoryKeyStore`. |
 | `kalecki/market.py` | NBP and Yahoo adapters, allowlist, offline mode. NBP walk-back tested with a fake session. |
 | `kalecki/config.py` | `config.toml` → `Config`. Nothing secret. |
@@ -40,6 +40,10 @@ model. This file is what a change must respect.
 .venv/bin/python -m kalecki.testdata tests/data/sample.xlsx --units 12 --months 18 --seed 7   # only if the generator changed
 ./run.sh                                         # then click every tab once
 ```
+
+When the change is done and the checks above are green, open the PR and **merge it yourself**
+(squash), so the owner can pull the code straight away. Do not leave it as a draft waiting for
+a click.
 
 Keep new logic in `engine.py` / `kalecki/analysis.py` as pure functions on polars frames with a
 test; keep `app.py` to layout and wiring. The sheet's formulas are reproduced in

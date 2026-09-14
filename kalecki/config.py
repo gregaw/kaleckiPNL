@@ -55,6 +55,8 @@ class Config:
     foreign_units: dict[str, str] = field(default_factory=dict)
     valuations_table: str = ""
     garage_value_index: bool = True
+    growth: dict[str, float] = field(default_factory=dict)   # city -> annual % change, e.g. {"Krakow": 0.05}
+    default_growth: float = 0.0
 
     @property
     def spreadsheet_id(self) -> str:
@@ -89,6 +91,8 @@ def from_dict(raw: dict) -> Config:
         foreign_units={str(k): str(v).upper() for k, v in fx.get("foreign_units", {}).items()},
         valuations_table=str(val.get("table", "")),
         garage_value_index=bool(val.get("garage_value_index", True)),
+        growth={str(k): float(v) for k, v in val.get("growth", {}).items()},
+        default_growth=float(val.get("default_growth", 0.0)),
     )
     cfg.tax.threshold_pln = float(cfg.tax.threshold_pln)
     return cfg

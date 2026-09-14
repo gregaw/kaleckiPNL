@@ -12,8 +12,15 @@ stores everything encrypted, and sends nothing but public identifiers over the n
   the Keychain, never on disk. Analytics run in an in-memory DuckDB.
 - **Reproduce the sheet's arithmetic** (expected transfer, balance, taxable profit) and flag
   every row where the sheet disagrees with itself.
-- **Returns** per unit per year: paste a `year → PLN/m²` table (per city if you like) and get
-  income, capital and total return, before and after tax, with a portfolio row.
+- **Returns** per unit per year: give each city an annual % change in value and every unit is
+  valued from its T0 price (values update live as you type, so the rate is easy to sanity-check);
+  or paste a `year → PLN/m²` table. Income, capital and total return, before and after tax, with
+  a portfolio row.
+- **Pivot**: slice the monthly ledger by unit, year, month, city, manager, kind…; spread one
+  dimension across the columns; sum/mean/min/max/count of any measure or yield on T0. A bar chart
+  follows the table.
+- **Drill down**: click a cell in any aggregate table (pivot, returns, yearly summary, arrears,
+  tax base) or a bar in the yield / pivot charts to see the monthly ledger rows behind it.
 - **Problems**: arrears, underpayment by manager, vacancies, missing/duplicate months, units
   missing from a tab, formula mismatches, media advances below actual bills, rents not indexed
   for a year, missing FX rates.
@@ -72,7 +79,8 @@ A unit with a `kurs NBP` value is treated as GBP; override per unit under `[fx] 
 | taxable profit (ryczałt base) | transfer + repairs + management invoice |
 | media result | media advance − HOA − electricity (when the owner pays those; `[analysis]`) |
 | net income | taxable profit − non-tax costs + media result |
-| unit value | price/m² × area for flats; garage = T0 value × city price index, or a `garaz` column |
+| unit value (growth model) | T0 value × (1 + city % change)^(year − T0 year); garages follow their city |
+| unit value (price table) | price/m² × area for flats; garage = T0 value × city price index, or a `garaz` column |
 | income return | annualised net income ÷ value at the start of the year |
 | capital return | (value − previous value) ÷ previous value |
 | after tax | the year's ryczałt allocated to units pro rata to taxable profit |
@@ -90,7 +98,7 @@ A unit with a `kurs NBP` value is treated as GBP; override per unit under `[fx] 
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q       # 43 tests on the synthetic fixture; no network
+.venv/bin/python -m pytest -q       # 46 tests on the synthetic fixture; no network
 ```
 
 Not verified from the build environment (no access there): the NBP endpoint, Yahoo quotes,

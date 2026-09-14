@@ -66,7 +66,18 @@ def _theme(chart: alt.Chart) -> alt.Chart:
             .configure_view(strokeWidth=0).configure_legend(labelColor=MUTED, titleColor=MUTED))
 
 
-def table(df: pl.DataFrame, key: str, pct: list[str] | None = None, height=None):
+def _cell_selection(ev) -> tuple[int, str] | None:
+    try:
+        cells = ev.selection.cells
+    except AttributeError:
+        return None
+    return tuple(cells[0]) if cells else None
+
+
+def table(df: pl.DataFrame, key: str, pct: list[str] | None = None, height=None, drill: pl.DataFrame | None = None):
+    """A dataframe with CSV download. With `drill`, clicking a cell shows the monthly rows behind
+    it: the selected row's dimensions (unit, year, city, manager…) plus a year taken from a
+    year-named column, filtered from `drill` (the monthly PnL)."""
     if df.height == 0:
         st.caption("nothing to show")
         return
@@ -78,8 +89,33 @@ def table(df: pl.DataFrame, key: str, pct: list[str] | None = None, height=None)
             cc[c] = st.column_config.NumberColumn(format="%.2f")
     d = df.with_columns([(pl.col(c) * 100).alias(c) for c in (pct or []) if c in df.columns]) if pct else df
     kw = {"height": height} if height else {}
-    st.dataframe(d.to_pandas(), hide_index=True, column_config=cc, width="stretch", **kw)
+    if drill is not None:
+        ev = st.dataframe(d.to_pandas(), hide_index=True, column_config=cc, width="stretch", key=f"tbl_{key}",
+                          on_select="rerun", selection_mode="single-cell", **kw)
+        picked = _cell_selection(ev)
+        if picked is not None:
+            r, c = picked
+            row = df.row(r, named=True)
+            sel = {k: row[k] for k in df.columns if k in an.PIVOT_DIMS}
+            if c.isdigit():
+                sel["year"] = int(c)
+            what = f"{c} = {row[c]:,.2f}" if isinstance(row[c], float) else f"{c} = {row[c]}"
+            show_drill(drill, sel, what, key)
+    else:
+        st.dataframe(d.to_pandas(), hide_index=True, column_config=cc, width="stretch", **kw)
     st.download_button("Download CSV", df.write_csv(), f"{key}.csv", "text/csv", key=f"dl_{key}")
+
+
+def show_drill(pnl: pl.DataFrame, sel: dict, what: str, key: str):
+    """The monthly rows behind one aggregate, under the table or chart that was clicked."""
+    rows = an.drill(pnl, sel)
+    dims = ", ".join(f"{k} {v}" for k, v in sel.items() if v is not None and v != "TOTAL" and k in pnl.columns)
+    with st.container(border=True):
+        st.markdown(f"**Behind {what}** — {dims or 'everything'} · {rows.height} monthly row(s) · click another cell to change")
+        if rows.height:
+            m = rows.select([pl.col("net_income_pln").sum().alias("net"), pl.col("transfer").sum().alias("tr"), pl.col("balance").sum().alias("bal")]).row(0)
+            st.caption(f"net income {m[0]:,.2f} PLN · transfers {m[1]:,.2f} · balance {m[2]:,.2f}")
+        table(rows, f"drill_{key}", height=min(420, 38 * rows.height + 40))
 
 
 # ----------------------------------------------------------------------------- sidebar
@@ -203,7 +239,7 @@ k3.metric("Net income, latest month", f"{ts.row(-1, named=True)['net_income_pln'
 k4.metric("Outstanding arrears", f"{arr.filter(pl.col('outstanding_pln') < 0)['outstanding_pln'].sum():,.0f} PLN")
 k5.metric("Problems", int(probs.height), help="see the Problems tab")
 
-tab_p, tab_r, tab_u, tab_pr, tab_t, tab_tr, tab_d = st.tabs(["Portfolio", "Returns", "Units", "Problems", "Tax & ops", "Trades", "Data"])
+tab_p, tab_pv, tab_r, tab_u, tab_pr, tab_t, tab_tr, tab_d = st.tabs(["Portfolio", "Pivot", "Returns", "Units", "Problems", "Tax & ops", "Trades", "Data"])
 
 # ----------------------------------------------------------------------------- portfolio
 with tab_p:
@@ -231,44 +267,135 @@ with tab_p:
             color=alt.Color("year:O", scale=alt.Scale(domain=yrs, range=[BLUE, ORANGE, AQUA, "#eda100", "#e87ba4"][:len(yrs)]), legend=alt.Legend(title="year", orient="top")),
             yOffset="year:O",
             tooltip=["unit_key:N", "year:O", alt.Tooltip("yield_on_t0:Q", format=".1%"), "months:Q", alt.Tooltip("net_income_pln:Q", format=",.0f")])
-        st.altair_chart(_theme(bars.properties(height=22 * yv["unit_key"].n_unique() * len(yrs) + 40)), width="stretch")
-        st.caption("Partial years are not annualised here; see Returns for annualised figures.")
+        pick = alt.selection_point(name="pick", fields=["unit_key", "year"], on="click")
+        ev = st.altair_chart(_theme(bars.add_params(pick).properties(height=22 * yv["unit_key"].n_unique() * len(yrs) + 40)),
+                             width="stretch", key="yield_chart", on_select="rerun")
+        st.caption("Partial years are not annualised here; see Returns for annualised figures. Click a bar for the months behind it.")
+        hit = (ev.selection.get("pick") or []) if hasattr(ev, "selection") else []
+        if hit:
+            h = hit[0]
+            sel = {"unit_key": h.get("unit_key"), "year": h.get("year")}
+            y_row = yv.filter((pl.col("unit_key") == sel["unit_key"]) & (pl.col("year") == int(sel["year"])))
+            what = f"yield {y_row['yield_on_t0'][0]:.1%}" if y_row.height else "the selected bar"
+            show_drill(pnl, sel, what, "yield_chart")
     table(ts, "portfolio_monthly")
+
+# ----------------------------------------------------------------------------- pivot
+with tab_pv:
+    st.subheader("Slice and dice")
+    st.caption("Group the monthly ledger by any dimensions, spread one across the columns, pick a measure. "
+               "The chart follows the table; click a bar or a cell for the months behind it.")
+    measures = [m for m in an.PIVOT_MEASURES if m in pnl.columns] + ["yield_on_t0"]
+    c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+    rows_sel = c1.multiselect("Rows", an.PIVOT_DIMS, default=["unit_key"], key="pv_rows")
+    cols_sel = c2.selectbox("Columns", ["(none)"] + an.PIVOT_DIMS, index=an.PIVOT_DIMS.index("year") + 1, key="pv_cols")
+    val_sel = c3.selectbox("Measure", measures, index=0, key="pv_val", format_func=lambda m: m.replace("_", " "))
+    agg_sel = c4.selectbox("Aggregate", list(an.PIVOT_AGGS), index=0, key="pv_agg", disabled=val_sel == "yield_on_t0",
+                           help="yield on T0 is always Σ net income ÷ Σ T0 value of the group")
+    with st.expander("Filters"):
+        f1, f2, f3, f4 = st.columns(4)
+        flt = {"year": f1.multiselect("Year", sorted(pnl["year"].unique().to_list()), key="pv_f_year"),
+               "city": f2.multiselect("City", sorted(pnl["city"].drop_nulls().unique().to_list()), key="pv_f_city"),
+               "manager": f3.multiselect("Manager", sorted(pnl["manager"].drop_nulls().unique().to_list()), key="pv_f_mgr"),
+               "unit_key": f4.multiselect("Unit", sorted(pnl["unit_key"].unique().to_list()), key="pv_f_unit")}
+    cols_dim = None if cols_sel == "(none)" else cols_sel
+    if not rows_sel and cols_dim is None:
+        st.info("Pick at least one row or column dimension.")
+    else:
+        agg = "sum" if val_sel == "yield_on_t0" else agg_sel
+        long = an.pivot(pnl, rows_sel + ([cols_dim] if cols_dim else []), val_sel, agg, None, flt)
+        wide = an.pivot(pnl, rows_sel, val_sel, agg, cols_dim, flt)
+        # chart: one bar per row-group, coloured by the column dimension
+        label_cols = rows_sel or [cols_dim]
+        ch = long.with_columns(pl.concat_str([pl.col(c).cast(pl.Utf8).fill_null("-") for c in label_cols], separator=" · ").alias("label"))
+        n_labels = ch["label"].n_unique()
+        n_series = ch[cols_dim].n_unique() if cols_dim and rows_sel else 1
+        fmt = ".1%" if val_sel == "yield_on_t0" else ",.0f"
+        base = alt.Chart(ch.to_pandas()).mark_bar(cornerRadiusEnd=4, size=max(6, min(18, 320 // max(1, n_series))))
+        enc = dict(y=alt.Y("label:N", title=None, sort="-x"),
+                   x=alt.X(f"{val_sel}:Q", title=f"{agg} of {val_sel.replace('_', ' ')}", axis=alt.Axis(format=".0%" if val_sel == "yield_on_t0" else ",.0f")),
+                   tooltip=[alt.Tooltip(c, type="nominal") for c in label_cols] + ([alt.Tooltip(f"{cols_dim}:N")] if cols_dim and rows_sel else [])
+                   + [alt.Tooltip(f"{val_sel}:Q", format=fmt)])
+        pick_fields = list(dict.fromkeys(label_cols + ([cols_dim] if cols_dim and rows_sel else [])))
+        pick = alt.selection_point(name="pick", fields=pick_fields, on="click")
+        if cols_dim and rows_sel:
+            enc["color"] = alt.Color(f"{cols_dim}:N", legend=alt.Legend(title=cols_dim, orient="top"))
+            enc["yOffset"] = alt.YOffset(f"{cols_dim}:N")
+        else:
+            base = base.mark_bar(cornerRadiusEnd=4, size=max(6, min(18, 320 // max(1, n_series))), color=BLUE)
+        ch_alt = base.encode(**enc).add_params(pick).properties(height=min(900, 18 * n_labels * n_series + 60))
+        ev = st.altair_chart(_theme(ch_alt), width="stretch", key="pivot_chart", on_select="rerun")
+        hit = (ev.selection.get("pick") or []) if hasattr(ev, "selection") else []
+        if hit:
+            h = hit[0]
+            show_drill(pnl, {k: h.get(k) for k in pick_fields}, f"the {val_sel.replace('_', ' ')} bar", "pivot_chart")
+        table(wide, "pivot", pct=([c for c in wide.columns if c not in rows_sel] if val_sel == "yield_on_t0" else None), drill=pnl)
 
 # ----------------------------------------------------------------------------- returns
 with tab_r:
     st.subheader("Annual return per unit")
-    c1, c2 = st.columns([2, 3])
-    with c1:
-        st.session_state["prices_text"] = st.text_area(
-            "Price per m² by year — paste cells from a sheet", value=st.session_state["prices_text"], height=160,
-            help="Two columns: year, PLN/m². Or a header row naming cities (and 'garaz' for a garage price), then one row per year.")
-        st.caption("Flat value = price/m² × area. Garage = T0 value scaled by the city's price index, unless a 'garaz' column gives a price.")
-    try:
-        prices = an.parse_price_table(st.session_state["prices_text"])
-    except ValueError as ex:
-        st.error(str(ex))
-        prices = an.parse_price_table("")
-    with c2:
+    mode = st.radio("Valuation model", ["Annual % change per city", "Paste a price/m² table"], horizontal=True, key="val_mode",
+                    help="Simplified: value = T0 value × (1 + city growth)^(years since T0). Or the older price/m² table.")
+    ledger_years = sorted(summary["year"].unique().to_list())
+    vals = pl.DataFrame(schema=an.VALUE_SCHEMA)
+    if mode == "Annual % change per city":
+        cities = sorted(units["city"].drop_nulls().unique().to_list())
+        st.session_state.setdefault("growth", {c: cfg.growth.get(c, cfg.growth.get(c.lower(), cfg.default_growth)) for c in cities})
+        st.session_state.setdefault("default_growth", cfg.default_growth)
+        g_cols = st.columns(max(1, min(6, len(cities) + 1)))
+        growth: dict[str, float] = {}
+        for i, city in enumerate(cities):
+            growth[city] = g_cols[i % len(g_cols)].number_input(
+                f"{city} % / year", value=float(st.session_state["growth"].get(city, cfg.default_growth)) * 100, step=0.5, format="%.1f",
+                key=f"growth_{city}", help=f"Annual change in value for units in {city}. Applied from each unit's T0 year.") / 100
+        dflt = g_cols[len(cities) % len(g_cols)].number_input(
+            "other / unknown city % / year", value=float(st.session_state["default_growth"]) * 100, step=0.5, format="%.1f", key="growth_default") / 100
+        st.session_state["growth"], st.session_state["default_growth"] = growth, dflt
+        since_t0 = st.checkbox("Show every year since the earliest T0", value=False, key="val_since_t0")
+        t0_min = units["acquired_on"].drop_nulls().dt.year().min() if "acquired_on" in units.columns and units["acquired_on"].drop_nulls().len() else None
+        first = min(ledger_years) - 1 if ledger_years else dt.date.today().year
+        if since_t0 and t0_min is not None:
+            first = min(first, int(t0_min))
+        years = list(range(first, (max(ledger_years) if ledger_years else dt.date.today().year) + 1))
+        vals = an.growth_values(units, growth, years, dflt)
+        st.markdown("**Unit values under these rates** — updates as you type; check the % against the numbers here")
+        table(an.values_matrix(vals, units), "unit_values_live")
+        st.caption("value(year) = T0 value × (1 + city %)^(year − T0 year). Garages follow their city. Years before a unit's T0 are blank. "
+                   "Put the rates in config.toml under [valuations.growth] to keep them.")
+    else:
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            st.session_state["prices_text"] = st.text_area(
+                "Price per m² by year — paste cells from a sheet", value=st.session_state["prices_text"], height=160,
+                help="Two columns: year, PLN/m². Or a header row naming cities (and 'garaz' for a garage price), then one row per year.")
+            st.caption("Flat value = price/m² × area. Garage = T0 value scaled by the city's price index, unless a 'garaz' column gives a price.")
+        try:
+            prices = an.parse_price_table(st.session_state["prices_text"])
+        except ValueError as ex:
+            st.error(str(ex))
+            prices = an.parse_price_table("")
+        with c2:
+            if prices.height:
+                table(prices, "prices")
+            else:
+                st.info("Paste a valuation table to compute returns. Yields on the T0 purchase value are on the Portfolio tab meanwhile.")
         if prices.height:
-            table(prices, "prices")
-        else:
-            st.info("Paste a valuation table to compute returns. Yields on the T0 purchase value are on the Portfolio tab meanwhile.")
-    if prices.height:
-        vals = an.unit_values(units, prices, cfg.garage_value_index)
+            vals = an.unit_values(units, prices, cfg.garage_value_index)
+    if vals.height:
         ret = an.returns(summary, units, vals, tax_y, cfg)
         tot = an.portfolio_returns(ret)
         metric = st.radio("Show", ["total_return", "income_return", "capital_return", "total_return_after_tax", "income_return_after_tax"],
                           horizontal=True, format_func=lambda m: m.replace("_", " "))
         mat = an.returns_matrix(ret, tot, metric)
         years_cols = [c for c in mat.columns if c != "unit_key"]
-        table(mat, f"returns_{metric}", pct=years_cols)
+        table(mat, f"returns_{metric}", pct=years_cols, drill=pnl)
         st.caption("income return = annualised net income ÷ value at the start of the year · capital return = change in value · "
-                   "after-tax allocates the year's ryczałt to units pro rata to their taxable profit. Partial years are annualised.")
+                   "after-tax allocates the year's ryczałt to units pro rata to their taxable profit. Partial years are annualised. "
+                   "Click a cell for the months behind it.")
         with st.expander("Per unit and year, all columns"):
             table(ret.select(["unit_key", "year", "months", "value_pln", "value_prev_pln", "net_income_pln", "tax_alloc_pln", "net_after_tax_pln",
                               "income_return", "capital_return", "total_return", "total_return_after_tax"]), "returns_detail",
-                  pct=["income_return", "capital_return", "total_return", "total_return_after_tax"])
+                  pct=["income_return", "capital_return", "total_return", "total_return_after_tax"], drill=pnl)
         with st.expander("Portfolio by year"):
             table(tot, "returns_portfolio", pct=["income_return", "income_return_after_tax", "capital_return", "total_return", "total_return_after_tax"])
         with st.expander("Unit values used"):
@@ -292,7 +419,7 @@ with tab_u:
     st.subheader("Yearly summary, all units")
     table(summary.select(["unit_key", "year", "months", "occupied_months", "contract_rent_pln", "transfer_pln", "expected_transfer_pln", "balance_pln",
                           "mgmt_pln", "repairs_pln", "non_tax_costs_pln", "hoa_pln", "electricity_pln", "media_result_pln", "taxable_profit_pln",
-                          "net_income_pln", "yield_on_t0"]), "unit_year_summary", pct=["yield_on_t0"])
+                          "net_income_pln", "yield_on_t0"]), "unit_year_summary", pct=["yield_on_t0"], drill=pnl)
 
 # ----------------------------------------------------------------------------- problems
 with tab_pr:
@@ -317,11 +444,11 @@ with tab_pr:
         f = f.filter(pl.col("unit_key").is_in(uf))
     table(f, "problems", height=500)
     st.subheader("Arrears by unit")
-    table(arr, "arrears")
+    table(arr, "arrears", drill=pnl)
     st.subheader("Shortfall by manager")
     by_mgr = pnl.filter(pl.col("balance_pln") < -0.005).group_by(pl.col("manager").fill_null("-")).agg([
         pl.len().alias("months_short"), pl.col("balance_pln").sum().round(2).alias("shortfall_pln")]).sort("shortfall_pln")
-    table(by_mgr, "shortfall_by_manager")
+    table(by_mgr, "shortfall_by_manager", drill=pnl)
 
 # ----------------------------------------------------------------------------- tax & ops
 with tab_t:
@@ -342,7 +469,7 @@ with tab_t:
     st.caption("Contract rent minus management fee for the latest month on file; what should arrive if nothing changes.")
     table(e.expected_cash(pnl), "expected_cash")
     st.subheader("Taxable base by unit and year")
-    table(summary.select(["unit_key", "year", "taxable_profit_pln"]).pivot(on="year", index="unit_key", values="taxable_profit_pln"), "tax_base_by_unit")
+    table(summary.select(["unit_key", "year", "taxable_profit_pln"]).pivot(on="year", index="unit_key", values="taxable_profit_pln"), "tax_base_by_unit", drill=pnl)
 
 # ----------------------------------------------------------------------------- trades
 with tab_tr:
