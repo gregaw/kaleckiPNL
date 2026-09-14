@@ -60,3 +60,21 @@ def test_generator_is_deterministic(tmp_path):
     ra = [r for r in a["All-Data"].iter_rows(values_only=True)]
     rb = [r for r in b["All-Data"].iter_rows(values_only=True)]
     assert ra == rb
+
+
+def test_reference_values_and_dates_are_lenient():
+    from kalecki.parse import _date, _num
+    assert _num("440 000,00 zł") == 440000.0 and _num("PLN 1,200.50") == 1200.5 and _num("1.234,5") == 1234.5
+    assert _num("12,5") == 12.5 and _num("1,234") == 1234.0 and _num("440 000") == 440000.0 and _num("-3.5") == -3.5
+    assert _num("=SUM(A1)") is None and _num("n/a") is None and _num(True) is None
+    import datetime as dt
+    assert _date(2015) == dt.date(2015, 1, 1) == _date("2015") == _date(2015.0)
+    assert _date("2015-03") == dt.date(2015, 3, 1) == _date("03/2015") and _date("15.03.2015") == dt.date(2015, 3, 15)
+    assert _date("2020-05-05 00:00:00") == dt.date(2020, 5, 5)
+    assert _date("abc") is None and _date(True) is None and _date(19000) is None
+    rows = [("nazwa", "mieszkanie", "typ", "wartość T0-najem", "powierzchnia", "piętro", "KW", "T0"),
+            ("A", "Krakow, Dluga 1/ 2", "mieszkanie", "450 000 zł", "52,5", 3, None, 2015),
+            ("B", "Krakow, Dluga 1/ g1", "garaż", 90000, None, None, None, "2017-06")]
+    ref = parse_reference(rows)
+    assert ref["value_t0"].to_list() == [450000.0, 90000.0] and ref["area_m2"].to_list() == [52.5, None]
+    assert ref["acquired_on"].to_list() == [dt.date(2015, 1, 1), dt.date(2017, 6, 1)]

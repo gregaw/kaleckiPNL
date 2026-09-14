@@ -37,6 +37,7 @@ model. This file is what a change must respect.
 
 ```bash
 .venv/bin/python -m pytest -q                    # must be green; CI runs exactly this
+.venv/bin/python -m pytest -q tests/test_app.py  # the dashboard itself, headless (AppTest), every tab
 .venv/bin/python -m kalecki.testdata tests/data/sample.xlsx --units 12 --months 18 --seed 7   # only if the generator changed
 ./run.sh                                         # then click every tab once
 ```
@@ -44,6 +45,11 @@ model. This file is what a change must respect.
 When the change is done and the checks above are green, open the PR and **merge it yourself**
 (squash), so the owner can pull the code straight away. Do not leave it as a draft waiting for
 a click.
+
+`tests/test_app.py` runs `app.py` headless with Streamlit's `AppTest` against a vault built from the
+sample (MemoryKeyStore, offline): it can set any keyed widget (`at.multiselect(key="pv_f_unit")`,
+`at.radio(key="val_mode")`) and read any table. It cannot click a dataframe cell, so keep the
+click → drill mapping in `analysis.cell_selection` and test that directly.
 
 Keep new logic in `engine.py` / `kalecki/analysis.py` as pure functions on polars frames with a
 test; keep `app.py` to layout and wiring. The sheet's formulas are reproduced in
