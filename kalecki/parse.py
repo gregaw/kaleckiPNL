@@ -119,7 +119,13 @@ def _num(v):
         s = v.strip()
         if not s or s.startswith("=") or s in {"-", ".", "–"}:
             return None
-        s = s.replace(" ", "").replace(" ", "").replace(",", ".")
+        # '440 000,00 zł', 'PLN 1,200.50', '£950' — keep digits, sign and separators only
+        s = re.sub(r"[^0-9,.\-]", "", s)
+        if "," in s and "." in s:
+            s = s.replace(",", "") if s.rfind(".") > s.rfind(",") else s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            head, _, tail = s.rpartition(",")
+            s = head.replace(",", "") + tail if len(tail) == 3 and head else s.replace(",", ".")
         try:
             return float(s)
         except ValueError:
@@ -144,14 +150,22 @@ def _text(v):
 
 
 def _date(v):
+    """Excel dates, ISO/Polish strings, 'YYYY-MM' and a bare year (T0 is often just '2015')."""
     if isinstance(v, dt.datetime):
         return v.date()
     if isinstance(v, dt.date):
         return v
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return dt.date(int(v), 1, 1) if 1900 <= v <= 2100 and float(v).is_integer() else None
     if isinstance(v, str):
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
+        s = v.strip()
+        if s.startswith("="):
+            return None
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%d-%m-%Y", "%Y.%m.%d", "%Y-%m", "%m/%Y", "%m.%Y", "%Y"):
             try:
-                return dt.datetime.strptime(v.strip(), fmt).date()
+                return dt.datetime.strptime(s, fmt).date()
             except ValueError:
                 pass
     return None

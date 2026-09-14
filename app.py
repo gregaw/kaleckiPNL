@@ -92,14 +92,9 @@ def table(df: pl.DataFrame, key: str, pct: list[str] | None = None, height=None,
     if drill is not None:
         ev = st.dataframe(d.to_pandas(), hide_index=True, column_config=cc, width="stretch", key=f"tbl_{key}",
                           on_select="rerun", selection_mode="single-cell", **kw)
-        picked = _cell_selection(ev)
-        if picked is not None:
-            r, c = picked
-            row = df.row(r, named=True)
-            sel = {k: row[k] for k in df.columns if k in an.PIVOT_DIMS}
-            if c.isdigit():
-                sel["year"] = int(c)
-            what = f"{c} = {row[c]:,.2f}" if isinstance(row[c], float) else f"{c} = {row[c]}"
+        hit = an.cell_selection(df, _cell_selection(ev))
+        if hit is not None:
+            sel, what = hit
             show_drill(drill, sel, what, key)
     else:
         st.dataframe(d.to_pandas(), hide_index=True, column_config=cc, width="stretch", **kw)
@@ -303,8 +298,9 @@ with tab_pv:
         st.info("Pick at least one row or column dimension.")
     else:
         agg = "sum" if val_sel == "yield_on_t0" else agg_sel
-        long = an.pivot(pnl, rows_sel + ([cols_dim] if cols_dim else []), val_sel, agg, None, flt)
-        wide = an.pivot(pnl, rows_sel, val_sel, agg, cols_dim, flt)
+        scope = an.apply_filters(pnl, flt)  # the drill behind a cell sees the same rows as the pivot
+        long = an.pivot(scope, rows_sel + ([cols_dim] if cols_dim else []), val_sel, agg, None)
+        wide = an.pivot(scope, rows_sel, val_sel, agg, cols_dim)
         # chart: one bar per row-group, coloured by the column dimension
         label_cols = rows_sel or [cols_dim]
         ch = long.with_columns(pl.concat_str([pl.col(c).cast(pl.Utf8).fill_null("-") for c in label_cols], separator=" · ").alias("label"))
@@ -328,8 +324,8 @@ with tab_pv:
         hit = (ev.selection.get("pick") or []) if hasattr(ev, "selection") else []
         if hit:
             h = hit[0]
-            show_drill(pnl, {k: h.get(k) for k in pick_fields}, f"the {val_sel.replace('_', ' ')} bar", "pivot_chart")
-        table(wide, "pivot", pct=([c for c in wide.columns if c not in rows_sel] if val_sel == "yield_on_t0" else None), drill=pnl)
+            show_drill(scope, {k: h.get(k) for k in pick_fields}, f"the {val_sel.replace('_', ' ')} bar", "pivot_chart")
+        table(wide, "pivot", pct=([c for c in wide.columns if c not in rows_sel] if val_sel == "yield_on_t0" else None), drill=scope)
 
 # ----------------------------------------------------------------------------- returns
 with tab_r:
@@ -338,6 +334,13 @@ with tab_r:
                     help="Simplified: value = T0 value × (1 + city growth)^(years since T0). Or the older price/m² table.")
     ledger_years = sorted(summary["year"].unique().to_list())
     vals = pl.DataFrame(schema=an.VALUE_SCHEMA)
+    gaps = an.valuation_gaps(units)
+    if gaps.height:
+        with st.expander(f"{gaps.height} unit(s) have no T0 value and cannot be valued", expanded=gaps.height == units.height):
+            st.caption("The T0 value comes from the Reference tab's 'wartosc T0' column, matched to the ledger by the unit key. "
+                       "A unit missing here is either absent from Reference (compare the keys character by character) or has an empty cell there. "
+                       "Rows without a T0 date are compounded from the first year shown.")
+            table(gaps, "valuation_gaps")
     if mode == "Annual % change per city":
         cities = sorted(units["city"].drop_nulls().unique().to_list())
         st.session_state.setdefault("growth", {c: cfg.growth.get(c, cfg.growth.get(c.lower(), cfg.default_growth)) for c in cities})

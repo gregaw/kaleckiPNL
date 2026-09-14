@@ -295,10 +295,23 @@ def values_matrix(values: pl.DataFrame, units: pl.DataFrame) -> pl.DataFrame:
     wide = values.pivot(on="year", index="unit_key", values="value_pln")
     years = sorted(int(c) for c in wide.columns if c != "unit_key")
     wide = wide.select(["unit_key"] + [str(y) for y in years])
-    wide = units.select(["unit_key", "city", "kind", pl.col("value_t0").cast(pl.Float64)]).join(wide, on="unit_key", how="inner").sort(["city", "unit_key"])
+    wide = units.select(["unit_key", "city", "kind", pl.col("value_t0").cast(pl.Float64)]).join(wide, on="unit_key", how="left").sort(["city", "unit_key"])
     tot = wide.select([pl.lit("TOTAL").alias("unit_key"), pl.lit(None, dtype=pl.Utf8).alias("city"), pl.lit(None, dtype=pl.Utf8).alias("kind"),
                        pl.col("value_t0").sum()] + [pl.col(str(y)).sum() for y in years])
     return pl.concat([wide, tot.cast(wide.schema)])
+
+
+def valuation_gaps(units: pl.DataFrame) -> pl.DataFrame:
+    """Units that cannot be valued and why: not in the Reference tab, or in it with an empty
+    'wartosc T0' cell. `t0_date` says whether the T0 date parsed; without it the value is
+    compounded from the first year shown."""
+    cols = ["unit_key", pl.col("in_reference").fill_null(False), pl.col("value_t0").cast(pl.Float64)]
+    cols.append(pl.col("acquired_on").is_not_null().alias("t0_date") if "acquired_on" in units.columns else pl.lit(False).alias("t0_date"))
+    u = units.select(cols)
+    return (u.filter(pl.col("value_t0").is_null() | (pl.col("value_t0") <= 0))
+            .with_columns(pl.when(~pl.col("in_reference")).then(pl.lit("not in Reference tab (key differs from the ledger?)"))
+                          .otherwise(pl.lit("in Reference but the T0 value cell is empty or not a number")).alias("why"))
+            .select(["unit_key", "in_reference", "t0_date", "why"]).sort("unit_key"))
 
 
 # ----------------------------------------------------------------------------- pivot
@@ -309,6 +322,35 @@ PIVOT_MEASURES = ["net_income_pln", "taxable_profit_pln", "contract_rent_pln", "
 PIVOT_AGGS = {"sum": pl.Expr.sum, "mean": pl.Expr.mean, "min": pl.Expr.min, "max": pl.Expr.max, "count": pl.Expr.count}
 
 
+def apply_filters(pnl: pl.DataFrame, filters: dict[str, list] | None) -> pl.DataFrame:
+    """Keep the rows whose dimension is in the allowed list; an empty list means no filter.
+    The pivot and the drill-down behind its cells must see the same rows."""
+    df = pnl
+    for k, allowed in (filters or {}).items():
+        if allowed and k in df.columns:
+            df = df.filter(pl.col(k).is_in(allowed))
+    return df
+
+
+def cell_selection(df: pl.DataFrame, picked: tuple | None) -> tuple[dict, str] | None:
+    """Turn a clicked (row, column) of an aggregate table into the drill keys and a label.
+    A stale click (the table shrank or lost the column since, e.g. after a filter change)
+    gives None instead of raising."""
+    if not picked or len(picked) != 2:
+        return None
+    r, c = picked
+    c = str(c)
+    if not isinstance(r, int) or r < 0 or r >= df.height or c not in df.columns:
+        return None
+    row = df.row(r, named=True)
+    sel = {k: row[k] for k in df.columns if k in PIVOT_DIMS}
+    if c.isdigit():
+        sel["year"] = int(c)
+    v = row[c]
+    what = f"{c} = {v:,.2f}" if isinstance(v, float) else f"{c} = {v}"
+    return sel, what
+
+
 def pivot(pnl: pl.DataFrame, rows: list[str], value: str, agg: str = "sum", cols: str | None = None,
           filters: dict[str, list] | None = None) -> pl.DataFrame:
     """Slice the monthly PnL: group by `rows` (and spread `cols` across the columns), aggregate
@@ -317,10 +359,7 @@ def pivot(pnl: pl.DataFrame, rows: list[str], value: str, agg: str = "sum", cols
     `yield_on_t0` is a derived measure: sum(net_income_pln) / T0 value of the units in the group."""
     if agg not in PIVOT_AGGS:
         raise ValueError(f"agg must be one of {list(PIVOT_AGGS)}")
-    df = pnl
-    for k, allowed in (filters or {}).items():
-        if allowed:
-            df = df.filter(pl.col(k).is_in(allowed))
+    df = apply_filters(pnl, filters)
     keys = list(dict.fromkeys(rows + ([cols] if cols else [])))
     if not keys:
         raise ValueError("pick at least one row or column dimension")

@@ -98,7 +98,8 @@ A unit with a `kurs NBP` value is treated as GBP; override per unit under `[fx] 
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q       # 46 tests on the synthetic fixture; no network
+.venv/bin/python -m pytest -q       # 53 tests on the synthetic fixture; no network, no Keychain
+.venv/bin/python -m pytest -q tests/test_app.py   # runs the dashboard headless (Streamlit AppTest), every tab
 ```
 
 Not verified from the build environment (no access there): the NBP endpoint, Yahoo quotes,

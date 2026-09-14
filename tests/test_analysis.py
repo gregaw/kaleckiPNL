@@ -150,3 +150,40 @@ def test_pivot_and_drill(parsed):
         an.pivot(p, [], "net_income_pln", "sum")
     d = an.drill(p, {"unit_key": u, "year": years[0], "TOTAL": 1.0, "not_a_column": "x"})
     assert d.height == s["months"][0] and set(d["unit_key"].to_list()) == {u}
+
+
+def test_apply_filters_and_cell_selection(parsed):
+    p = e.monthly_pnl(parsed.ledger, parsed.units)
+    u = parsed.units.filter(pl.col("in_ledger")).row(0, named=True)["unit_key"]
+    scope = an.apply_filters(p, {"unit_key": [u], "year": [], "not_a_column": ["x"]})
+    assert set(scope["unit_key"].to_list()) == {u}
+    # the pivot on the filtered scope equals the pivot with the same filters
+    a = an.pivot(p, ["unit_key"], "net_income_pln", "sum", "year", {"unit_key": [u]})
+    b = an.pivot(scope, ["unit_key"], "net_income_pln", "sum", "year")
+    assert a.equals(b)
+    # clicking a year cell of that pivot drills into the filtered unit only
+    wide = an.pivot(scope, ["city"], "net_income_pln", "sum", "year")
+    year = [c for c in wide.columns if c.isdigit()][0]
+    sel, what = an.cell_selection(wide, (0, year))
+    assert sel["year"] == int(year) and sel["city"] == wide["city"][0] and what.startswith(f"{year} = ")
+    rows = an.drill(scope, sel)
+    assert rows.height and set(rows["unit_key"].to_list()) == {u} and set(rows["year"].to_list()) == {int(year)}
+    # a stale click after the table changed shape is ignored instead of raising
+    assert an.cell_selection(wide, (0, "XXX")) is None
+    assert an.cell_selection(wide, (wide.height, year)) is None
+    assert an.cell_selection(wide, None) is None
+    assert an.cell_selection(wide, (0, "TOTAL"))[0].get("year") is None
+
+
+def test_values_matrix_keeps_units_without_values_and_valuation_gaps(parsed):
+    units = parsed.units
+    vals = an.growth_values(units, {}, [2024, 2025], 0.0)
+    m = an.values_matrix(vals, units)
+    assert m.height == units.height + 1 and m["value_t0"].null_count() == units["value_t0"].null_count()
+    gaps = an.valuation_gaps(units)
+    ledger_only = units.filter(~pl.col("in_reference"))["unit_key"].to_list()
+    assert set(gaps["unit_key"].to_list()) == set(ledger_only)
+    assert all("not in Reference" in w for w in gaps["why"].to_list())
+    blank = units.with_columns(pl.when(pl.col("in_reference")).then(None).otherwise(pl.col("value_t0")).alias("value_t0"))
+    g2 = an.valuation_gaps(blank)
+    assert g2.height == units.height and (g2.filter(pl.col("in_reference"))["why"].str.contains("empty").all())
