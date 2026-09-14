@@ -41,6 +41,10 @@ model. This file is what a change must respect.
 ./run.sh                                         # then click every tab once
 ```
 
+When the change is done and the checks above are green, open the PR and **merge it yourself**
+(squash), so the owner can pull the code straight away. Do not leave it as a draft waiting for
+a click.
+
 Keep new logic in `engine.py` / `kalecki/analysis.py` as pure functions on polars frames with a
 test; keep `app.py` to layout and wiring. The sheet's formulas are reproduced in
 `engine.monthly_pnl` — if the owner changes a formula in the sheet, change it there and the
